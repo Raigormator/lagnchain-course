@@ -2,22 +2,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from langchain.chat_models import init_chat_model
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+import ollama
 from langsmith import traceable
 
 MAX_ITERATIONS = 10 #number of agent execution runs
 MODEL = "qwen3:1.7b"
 
-@tool
+@traceable(run_type="tool") # help us trace this function when it runs it its own trace in langsmith
 def get_product_price(product:str) -> float:
     """Look up the price of a product in the catalog."""
     print(f"    >>Executing get_product_price(product='{product}')")
     prices = {"laptop": 1299.99, "headphones": 149.95, "keyboard": 89.50}
     return prices.get(product, 0)
 
-@tool
+@traceable(run_type="tool") # help us trace this function when it runs it its own trace in langsmith
 def apply_discount(price: float, discount_tier: str) -> float:
     """Apply a discount tier to a price and return the final price
     Available tiers: bronze, silver, gold."""
@@ -26,23 +24,69 @@ def apply_discount(price: float, discount_tier: str) -> float:
     discount = discount_percentages.get(discount_tier,0)
     return round(price * (1 - discount / 100), 2)
 
+# Difference 2: Without @tool, we must MANUALLY define the JSON schema for each function.
+# This is exactly what LangChain's @tool decorator generates automatically
+# from the function's type hints and docstring.
+
+tools_for_llm = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_price",
+            "description": "Look up the price of a product in the catalog.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "The product name, e.g. 'laptop', 'headphones', 'keyboard'",
+                    },
+                },
+                "required": ["product"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_discount",
+            "description": "Apply a discount tier to a price and return the final price. Available tiers: bronze, silver, gold.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "price": {
+                        "type": "number",
+                        "description": "The priginal price",
+                    },
+                },
+                "required": ["price", "discount_tier"],
+            },
+        }
+    }
+]
+
+# Helper: traced Ollama Call
+# Difference 3: Without LangChain, we must manually trace LLM calls for LangSmith.
+
+@traceable(name="Ollama Chat", run_type="llm")
+def ollama_chat_traced(messages):
+    return ollama.chat(model=MODEL, tools=tools_for_llm, messages=messages)
 # --- Agent Loop ---
 
-@traceable(name="LangChain Agent Loop") # help us trace everything in this block
+@traceable(name="Ollama Agent Loop") # help us trace this function when it runs it its own trace in langsmith
 def run_agent(question:str):
-    tools = [get_product_price, apply_discount]
-    tools_dict = {t.name: t for t in tools}  #take the result of the LLM
-
-    # llm = init_chat_model(f"ollama:{MODEL}", temperature=0)
-    llm = init_chat_model(f"openai:gpt-5", temperature=0)
-    llm_with_tools = llm.bind_tools(tools) 
+    tools_dict = {
+        "get_product_price": get_product_price,
+        "apply_discount": apply_discount,
+    }  #take the result of the LLM
 
     print(f"Question: {question}")
     print("=" * 60)
 
     messages = [
-        SystemMessage(
-            content=(
+        {
+            "role": "system",
+            "content": (
                 "You are a helpful dhopping assitant."
                 "You have access to a product catalog tool "
                 "and a discount tool.\n\n"
@@ -57,26 +101,28 @@ def run_agent(question:str):
                 "4. If the user does not specify a discount tier, "
                 "ask them which tier to use - do NOT assume one."
             )
-        ),
-        HumanMessage(content=question)
+        },
+        {"role": "user","content": question},
     ]
     for iteration in range(1, MAX_ITERATIONS + 1): #decide if we need to execute the tool 
         print(f"\n Iteration {iteration} ---")
 
-        ai_message = llm_with_tools.invoke(messages) #thought step - tool call decision or content,
+        # Difference 
+        response = ollama_chat_traced(messages=messages)
+        ai_message = response.message
 
-        tool_calls = ai_message.tool_calls 
+        tool_calls = ai_message.tool_calls
         
         #if no tool calls, thsi is the final answer, return answer from the user
         if not tool_calls:
-            print(f"\nFinal Answer: {ai_message.content}")
+            print(f"\nFinal Answer: <think> \n {ai_message.content}")
             return ai_message.content
 
         #Process only the FIRST tool call - force one tool per iteration
         tool_call = tool_calls[0]
-        tool_name = tool_call.get("name")
-        tool_args = tool_call.get("args", {})
-        tool_call_id = tool_call.get("id")
+        # Differnece 6: Attribute access (.function.nsme) instead of dict access (.get("name"))
+        tool_name = tool_call.function.name
+        tool_args = tool_call.function.arguments
 
         print(f" [Tool Selected] {tool_name} with args: {tool_args}")
 
@@ -84,13 +130,16 @@ def run_agent(question:str):
         if tool_to_use is None:
             raise ValueError(f"Tool '{tool_name}' not found")
 
-        observation = tool_to_use.invoke(tool_args)
+        observation = tool_to_use(**tool_args)
 
         print(f" [Tool Result] {observation}")
 
         messages.append(ai_message) #help the LLM remember what were the results. eknow the history
         messages.append(
-            ToolMessage(content=str(observation), tool_call_id=tool_call_id)
+            {
+                "role": "tool",
+                "content": str(observation),
+            }
         )
 
     print("ERROR: Max iterations reached without a final answer")
