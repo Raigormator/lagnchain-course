@@ -24,17 +24,17 @@ os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 
 embeddings = OpenAIEmbeddings(
-    model="text-embedding-3-small",
-    show_progress_bar=False,
-    chunk_size=50,
-    retry_min_seconds=10,
+    model="text-embedding-3-small", # embedding model
+    show_progress_bar=False, # show progress bar
+    chunk_size=50, # how many test objects langchain will send to the embedding model
+    retry_min_seconds=10, # how long to wait before retrying
 )
-vectorstore = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
-# vectorstore = PineconeVectorStore(
-#     index_name="langchain-docs-2025", embedding=embeddings
-# )
-tavily_extract = TavilyExtract()
-tavily_map = TavilyMap(max_depth=5, max_breadth=20, max_pages=1000)
+# vectorstore = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
+vectorstore = PineconeVectorStore(
+    index_name="langchain-docs-index", embedding=embeddings
+)
+tavily_extract = TavilyExtract()  
+tavily_map = TavilyMap(max_depth=5, max_breadth=20, max_pages=1000) 
 tavily_crawl = TavilyCrawl()
 
 
